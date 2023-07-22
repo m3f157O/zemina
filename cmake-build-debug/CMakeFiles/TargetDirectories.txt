@@ -1,3 +1,0 @@
-C:/Users/BLUE_gigi/CLionProjects/zemina/cmake-build-debug/CMakeFiles/zemina.dir
-C:/Users/BLUE_gigi/CLionProjects/zemina/cmake-build-debug/CMakeFiles/edit_cache.dir
-C:/Users/BLUE_gigi/CLionProjects/zemina/cmake-build-debug/CMakeFiles/rebuild_cache.dir
