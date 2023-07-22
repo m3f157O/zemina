@@ -413,17 +413,7 @@ int main(int argc, char** argv) {
 
     std::cout << "\t[+] Have fun" << std::endl;
 
-    char stream[1024];
-    char stop[100]="sc stop %s";
-    char del[100]="sc delete %s";
+    MyStopAndDeleteService();
 
-    snprintf(stream,100,stop,zemina);
-    system(stream);
-    printf("Wait some seconds for service deletion\n");
-    Sleep(5);
 
-    snprintf(stream,100,del,zemina);
-    system(stream);
-
-    //printf("%s",exec(stream).c_str());    return 0;
 }
