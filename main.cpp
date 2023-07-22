@@ -561,7 +561,7 @@ int main(int argc, char** argv) {
             printf("[X] Unable to terminate\n [X]");
         }
         else
-            printf("[O] %d terminated\n [O]",pid);
+            printf("[O] %d terminated [O]\n",pid);
 
     }
 
